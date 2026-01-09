@@ -15,6 +15,7 @@ async function main() {
   const chatId = envRequired("TG_CHAT_ID");
   const query = envRequired("SEARCH_QUERY");
   const headless = parseBoolEnv("HEADLESS", true);
+  const userDataDir = process.env.USER_DATA_DIR;
 
   const sent = loadSent();
   const listings = await scrapeWithRetries(query, headless, MAX_ATTEMPTS);
@@ -51,6 +52,7 @@ async function scrapeWithRetries(query, headless, maxAttempts) {
 }
 
 async function scrapeOnce(query, headless) {
+  const userDataDir = process.env.USER_DATA_DIR;
   const direct = await fetchResultsDirect(query).catch((err) => {
     console.warn(`Direct fetch path failed: ${err.message}`);
     return [];
@@ -60,51 +62,72 @@ async function scrapeOnce(query, headless) {
     return direct;
   }
 
-  const browser = await chromium.launch({
+  const launchOptions = {
     headless,
     args: [
       "--disable-blink-features=AutomationControlled",
       "--disable-dev-shm-usage",
       "--disable-gpu",
       "--no-sandbox",
-      "--window-size=1280,1600",
+      "--window-size=1366,768",
     ],
-  });
+  };
 
-  const context = await browser.newContext({
+  const contextOptions = {
     userAgent: UA,
-    viewport: { width: 1280, height: 1600 },
-  });
+    viewport: { width: 1366, height: 768 },
+    locale: "de-CH",
+    timezoneId: "Europe/Zurich",
+    geolocation: { latitude: 47.3769, longitude: 8.5417 },
+    permissions: ["geolocation"],
+  };
+
+  let browser = null;
+  let context = null;
+  if (userDataDir) {
+    context = await chromium.launchPersistentContext(userDataDir, {
+      ...launchOptions,
+      ...contextOptions,
+    });
+  } else {
+    browser = await chromium.launch(launchOptions);
+    context = await browser.newContext(contextOptions);
+  }
+
   const page = await context.newPage();
 
   try {
     await navigateToSearchForm(page);
     await maybeAcceptCookies(page);
     await waitForRecaptcha(page);
+    await randDelay();
+    await humanizePage(page);
 
     const input = await page.waitForSelector('input[name="query"]', { timeout: 15000 });
     await input.fill("");
-    await input.type(query, { delay: 30 });
+    await input.type(query, { delay: 80 });
 
-    const button = await page.waitForSelector('input[type="button"][value="Suchen"]', {
-      timeout: 10000,
-    });
+    // Try multiple submit attempts with random sleeps between to get past Recaptcha quirks
+    const searchButton = page.locator('input[type="button"][value="Suchen"]');
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await randDelay();
+      await searchButton.click({ timeout: 5000, force: true }).catch(() => null);
+      await page
+        .evaluate("typeof submitForm === 'function' ? submitForm() : null")
+        .catch(() => null);
 
-    // Try both click and direct submit; tolerate navigation destroying the context
-    const navPromise = page.waitForURL(/search\/mate/, { timeout: 60000 }).catch(() => null);
-    await Promise.allSettled([
-      button.click({ timeout: 5000 }),
-      page.evaluate("typeof submitForm === 'function' ? submitForm() : null"),
-      navPromise,
-    ]);
+      // After each attempt, give the page some time to navigate or render results
+      const navigated = await page
+        .waitForURL(/search\/mate/, { timeout: 20000 })
+        .catch(() => null);
+      const hasResults = await page
+        .waitForSelector("#search-result-list li.search-mate-entry", { timeout: 5000 })
+        .then(() => true)
+        .catch(() => false);
 
-    // If still on form, try submit again once more after a brief pause
-    if (page.url().includes("search/room")) {
-      await delay(1000);
-      await Promise.allSettled([
-        page.evaluate("typeof submitForm === 'function' ? submitForm() : null"),
-        page.waitForURL(/search\/mate/, { timeout: 20000 }).catch(() => null),
-      ]);
+      if (navigated || page.url().includes("search/mate") || hasResults) {
+        break;
+      }
     }
 
     await waitForResultsOrFallback(page, query);
@@ -143,7 +166,11 @@ async function scrapeOnce(query, headless) {
 
     return normalized;
   } finally {
-    await browser.close();
+    if (context && context.browser()) {
+      await context.close();
+    } else if (browser) {
+      await browser.close();
+    }
   }
 }
 
@@ -153,6 +180,7 @@ async function navigateToSearchForm(page) {
 
   // click logo link to ensure we're on /wgzimmer.html
   const homeLink = await page.waitForSelector('a[title="wgzimmer.ch"]', { timeout: 15000 });
+  await randDelay();
   await Promise.allSettled([homeLink.click(), page.waitForLoadState("domcontentloaded")]);
   await maybeAcceptCookies(page);
 
@@ -160,6 +188,7 @@ async function navigateToSearchForm(page) {
   const tileSelector = 'a[href="/wgzimmer/search/mate.html"]';
   const tile = await page.$(tileSelector);
   if (tile) {
+    await randDelay();
     await Promise.allSettled([tile.click(), page.waitForLoadState("domcontentloaded")]);
     await maybeAcceptCookies(page);
   } else {
@@ -179,6 +208,7 @@ async function navigateToSearchForm(page) {
 async function maybeAcceptCookies(page) {
   try {
     const btn = await page.waitForSelector("p.fc-button-label", { timeout: 5000 });
+    await randDelay();
     await btn.click();
   } catch (_) {
     // ignore missing banner
@@ -243,18 +273,51 @@ function buildSearchUrl(query) {
 
 async function fetchResultsDirect(query) {
   const url = buildSearchUrl(query);
-  const resp = await fetch(url, {
+  const headers = {
+    "User-Agent": UA,
+    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+    Referer: "https://www.wgzimmer.ch/wgzimmer/search/room.html",
+  };
+
+  // Try GET first
+  {
+    const resp = await fetch(url, { headers, redirect: "follow" });
+    if (resp.ok) {
+      const html = await resp.text();
+      const listings = parseListingsFromHtml(html);
+      if (listings.length) return listings;
+    }
+  }
+
+  // Fallback: try POSTing the form without recaptcha token (sometimes accepted)
+  const formBody = new URLSearchParams({
+    startSearch: "true",
+    "g-recaptcha-response": "",
+    "bypass-csrf": "true",
+    query,
+    priceMin: "200",
+    priceMax: "2000",
+    wgState: "all",
+    permanent: "all",
+    studio: "false",
+    student: "none",
+    typeofwg: "all",
+  });
+
+  const respPost = await fetch("https://www.wgzimmer.ch/wgzimmer/search/mate.html", {
+    method: "POST",
     headers: {
-      "User-Agent": UA,
-      "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+      ...headers,
+      "Content-Type": "application/x-www-form-urlencoded",
     },
+    body: formBody.toString(),
     redirect: "follow",
   });
-  if (!resp.ok) throw new Error(`direct fetch status ${resp.status}`);
-  const html = await resp.text();
-  const listings = parseListingsFromHtml(html);
-  if (!listings.length) throw new Error("direct fetch returned no listings");
-  return listings;
+  if (!respPost.ok) throw new Error(`direct fetch status ${respPost.status}`);
+  const htmlPost = await respPost.text();
+  const listingsPost = parseListingsFromHtml(htmlPost);
+  if (!listingsPost.length) throw new Error("direct fetch returned no listings");
+  return listingsPost;
 }
 
 function parseListingsFromHtml(html) {
@@ -295,6 +358,15 @@ function renderListingsHtml(listings) {
     )
     .join("");
   return `<ul id="search-result-list">${items}</ul>`;
+}
+
+async function humanizePage(page) {
+  // small scroll and mouse move to mimic a user
+  await page.mouse.move(50 + Math.random() * 200, 50 + Math.random() * 200);
+  await randDelay();
+  await page.mouse.move(300 + Math.random() * 200, 300 + Math.random() * 200);
+  await page.mouse.wheel(0, 200 + Math.random() * 300);
+  await randDelay();
 }
 
 async function sendTelegram(token, chatId, message) {
@@ -345,6 +417,11 @@ function parseBoolEnv(name, defaultVal) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function randDelay() {
+  const ms = (4 + Math.random() * 6) * 1000; // 4-10s
+  return delay(ms);
 }
 
 main().catch((err) => {
