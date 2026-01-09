@@ -12,6 +12,7 @@ Playwright-based scraper that searches `https://www.wgzimmer.ch/wgzimmer/search/
    - `TG_CHAT_ID`
    - `SEARCH_QUERY` (e.g. `culmannstrasse 26`)
    - optional: `HEADLESS=false` to watch the browser when debugging locally
+   - optional: `USER_DATA_DIR=./.playwright-profile` to reuse a persistent browser profile
 
 The bot:
 - opens the search page, accepts the cookie banner if present, waits for Recaptcha to be ready,
