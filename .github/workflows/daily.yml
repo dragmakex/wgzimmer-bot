@@ -1,0 +1,47 @@
+name: daily-check
+
+on:
+  schedule:
+    - cron: "15 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SEARCH_QUERY: ${{ secrets.SEARCH_QUERY }}
+      HEADLESS: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.1.0
+
+      - name: Install deps
+        run: bun install
+
+      - name: Install Playwright browsers
+        run: bunx playwright install chromium --with-deps
+
+      - name: Run scraper
+        run: bun run start
+
+      - name: Commit sent.json if changed
+        if: github.event_name != 'pull_request'
+        run: |
+          if git diff --quiet -- data/sent.json; then
+            echo "No new ids to persist."
+            exit 0
+          fi
+          git config user.name "wgzimmer-bot"
+          git config user.email "wgzimmer-bot@users.noreply.github.com"
+          git add data/sent.json
+          git commit -m "Update sent.json"
+          git push

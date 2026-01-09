@@ -1,0 +1,6 @@
+target
+node_modules
+**/*.rs.bk
+.env
+*.log
+bun.lock
