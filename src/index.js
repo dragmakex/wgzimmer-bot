@@ -11,8 +11,8 @@ const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 async function main() {
-  const token = envRequired("TELEGRAM_BOT_TOKEN");
-  const chatId = envRequired("TELEGRAM_CHAT_ID");
+  const token = envRequired("TG_BOT_TOKEN");
+  const chatId = envRequired("TG_CHAT_ID");
   const query = envRequired("SEARCH_QUERY");
   const headless = parseBoolEnv("HEADLESS", true);
 
