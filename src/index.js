@@ -148,11 +148,14 @@ async function navigateToSearchForm(page) {
   await maybeAcceptCookies(page);
 
   // click "Ich suche ein WG-Zimmer" tile
-  const searchLink = await page.waitForSelector('a[href="/wgzimmer/search/mate.html"]', {
-    timeout: 15000,
-  });
-  await Promise.allSettled([searchLink.click(), page.waitForLoadState("domcontentloaded")]);
-  await maybeAcceptCookies(page);
+  const tileSelector = 'a[href="/wgzimmer/search/mate.html"]';
+  const tile = await page.$(tileSelector);
+  if (tile) {
+    await Promise.allSettled([tile.click(), page.waitForLoadState("domcontentloaded")]);
+    await maybeAcceptCookies(page);
+  } else {
+    console.warn("Search tile not found, navigating directly to search page");
+  }
 
   // final fallback to ensure we landed on the form
   if (!page.url().includes("/wgzimmer/search/mate.html")) {
@@ -160,6 +163,7 @@ async function navigateToSearchForm(page) {
       waitUntil: "domcontentloaded",
       timeout: 60000,
     });
+    await maybeAcceptCookies(page);
   }
 }
 
