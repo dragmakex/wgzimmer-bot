@@ -27,6 +27,3 @@ The bot:
 - `TG_BOT_TOKEN`
 - `TG_CHAT_ID`
 - `SEARCH_QUERY`
-- `TG_BOT_TOKEN`
-- `TG_CHAT_ID`
-- `SEARCH_QUERY`
