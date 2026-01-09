@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { chromium, request } = require("playwright");
+const { chromium } = require("playwright");
 require("dotenv").config();
 
 const SEARCH_URL = "https://www.wgzimmer.ch/wgzimmer/search/room.html";
@@ -51,6 +51,15 @@ async function scrapeWithRetries(query, headless, maxAttempts) {
 }
 
 async function scrapeOnce(query, headless) {
+  const direct = await fetchResultsDirect(query).catch((err) => {
+    console.warn(`Direct fetch path failed: ${err.message}`);
+    return [];
+  });
+  if (direct.length) {
+    console.log("Direct fetch succeeded, using those results");
+    return direct;
+  }
+
   const browser = await chromium.launch({
     headless,
     args: [
@@ -201,7 +210,18 @@ async function waitForResultsOrFallback(page, query) {
 
   const fallbackUrl = buildSearchUrl(query);
   await page.goto(fallbackUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
-  await page.waitForSelector(resultsSelector, { timeout: 45000 });
+  try {
+    await page.waitForSelector(resultsSelector, { timeout: 45000 });
+  } catch (err) {
+    // As a last resort, fetch and parse HTML directly
+    const parsed = await fetchResultsDirect(query);
+    if (parsed.length) {
+      // Inject parsed results into the page to reuse downstream extraction
+      await page.setContent(renderListingsHtml(parsed));
+    } else {
+      throw err;
+    }
+  }
 }
 
 function buildSearchUrl(query) {
@@ -221,6 +241,61 @@ function buildSearchUrl(query) {
   return `https://www.wgzimmer.ch/wgzimmer/search/mate.html?${params.toString()}`;
 }
 
+async function fetchResultsDirect(query) {
+  const url = buildSearchUrl(query);
+  const resp = await fetch(url, {
+    headers: {
+      "User-Agent": UA,
+      "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+    },
+    redirect: "follow",
+  });
+  if (!resp.ok) throw new Error(`direct fetch status ${resp.status}`);
+  const html = await resp.text();
+  const listings = parseListingsFromHtml(html);
+  if (!listings.length) throw new Error("direct fetch returned no listings");
+  return listings;
+}
+
+function parseListingsFromHtml(html) {
+  const results = [];
+  const regex =
+    /<a[^>]+href="(https:\/\/www\.wgzimmer\.ch\/wglink[^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+  let match;
+  while ((match = regex.exec(html)) !== null) {
+    const href = match[1];
+    const summary = stripTags(match[2] || "");
+    const id = extractIdFromHref(href);
+    if (id) {
+      results.push({ id, href, summary });
+    }
+  }
+  return results;
+}
+
+function stripTags(str) {
+  return str.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function extractIdFromHref(href) {
+  try {
+    const url = new URL(href);
+    const segments = url.pathname.split("/").filter(Boolean);
+    return segments[2] || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function renderListingsHtml(listings) {
+  const items = listings
+    .map(
+      (l) =>
+        `<li class="search-mate-entry"><a href="${l.href}">${l.summary}</a></li>`
+    )
+    .join("");
+  return `<ul id="search-result-list">${items}</ul>`;
+}
 
 async function sendTelegram(token, chatId, message) {
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
